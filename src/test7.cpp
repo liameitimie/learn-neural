@@ -4,15 +4,12 @@ using namespace luisa;
 using namespace luisa::compute;
 using namespace fmt;
 
-// struct Fragment {
-//     $uint4 x;
-// };
-
 void wmma_load($uint4 &frag, $buffer<uint4> &buf, $uint offset) {
     frag = buf.read(offset + warp_lane_id());
 };
 void wmma_load($uint4 &frag, $shared<uint4> &smem, $uint offset) {
-    frag = smem.read(offset + warp_lane_id());
+    $ lid = warp_lane_id();
+    frag = smem.read(offset + lid + lid / 8);
 };
 void wmma_store($uint4 &frag, $buffer<uint4> &buf, $uint offset) {
     buf.write(offset + warp_lane_id(), frag);
@@ -80,32 +77,27 @@ int main(int argc, char *argv[]) {
     Stream stream = device.create_stream();
 
     const uint layer_width = 64;
-    const uint batch_size = 16384;
-    const uint tile_k = 64;
-    const uint split_k = batch_size / tile_k;
+    const uint batch_size = 1920 * 1080;
 
-    vector<half> a_h(layer_width * batch_size);
+    vector<half> a_h(layer_width * layer_width);
     vector<half> b_h(layer_width * batch_size);
-    vector<float> c_h(layer_width * layer_width);
-    vector<half> c_buffer(layer_width * layer_width);
+    vector<float> a_tmp(layer_width * layer_width);
+    vector<float> b_tmp(layer_width * batch_size);
+    vector<float> c_h(layer_width * batch_size);
+    vector<half> c_buffer(layer_width * batch_size);
 
     srand(0);
+    for (int i = 0; i < layer_width * layer_width; i++) {
+        a_h[i] = a_tmp[i] = rand() / 65536.0;
+    }
     for (int i = 0; i < layer_width * batch_size; i++) {
-        a_h[i] = rand() / 65536.0;
-        b_h[i] = rand() / 65536.0;
+        b_h[i] = b_tmp[i] = rand() / 65536.0;
     }
 
     Clock timer;
-
     timer.tic();
-    // for (int k = 0; k < batch_size; k++) {
-    //     for (int y = 0; y < layer_width; y++) {
-    //         for (int x = 0; x < layer_width; x++) {
-    //             c_h[x + y*layer_width] += a_h[x + k*layer_width] * b_h[y + k*layer_width];
-    //         }
-    //     }
-    // }
-    auto t_mma = [&](float* c, half* a, half* b) {
+
+    auto t_mma = [&](float* c, float* a, float* b) {
         for (int col = 0; col < 16; col++) {
             for (int row = 0; row < 16; row++) {
                 int c_idx = col % 8 + row * 8 + col / 8 * 128;
@@ -118,101 +110,77 @@ int main(int argc, char *argv[]) {
             }
         }
     };
-    for (int tk = 0; tk < batch_size / 16; tk++) {
-        for (int ty = 0; ty < layer_width / 16; ty++) {
-            for (int tx = 0; tx < layer_width / 16; tx++) {
-                t_mma(c_h.data() + (tx + ty * 4) * 256,
-                    a_h.data() + (tx + tk * 4) * 256,
-                    b_h.data() + (ty + tk * 4) * 256
-                );
-            }
-        }
-    }
-    print("{}\n", timer.toc());
-    print("[");
-    for (int i = 0; i < 32; i++) {
-        print("{}", c_h[i]);
-        if (i < 31) print(", ");
-    }
-    print("]\n");
+    // for (int ty = 0; ty < batch_size / 16; ty++) {
+    //     for (int tx = 0; tx < layer_width / 16; tx++) {
+    //         for (int tk = 0; tk < layer_width / 16; tk++) {
+    //             t_mma(c_h.data() + (tx + ty * 4) * 256,
+    //                 a_tmp.data() + (tx + tk * 4) * 256,
+    //                 b_tmp.data() + (tk + ty * 4) * 256
+    //             );
+    //         }
+    //     }
+    // }
+    // print("{}\n", timer.toc());
+    // print("[");
+    // for (int i = 0; i < 32; i++) {
+    //     print("{}", c_h[i]);
+    //     if (i < 31) print(", ");
+    // }
+    // print("]\n");
 
-    auto a = device.create_buffer<uint4>(layer_width * batch_size / 8);
+    auto a = device.create_buffer<uint4>(layer_width * layer_width / 8);
     auto b = device.create_buffer<uint4>(layer_width * batch_size / 8);
-    auto c = device.create_buffer<uint4>(layer_width * layer_width / 8);
-    auto tmp = device.create_buffer<uint4>(layer_width * layer_width / 8);
+    auto c = device.create_buffer<uint4>(layer_width * batch_size / 8);
 
-    stream << a.copy_from(a_h.data()) << b.copy_from(b_h.data()) << synchronize();
+    stream << a.copy_from(a_h.data()) << b.copy_from(b_h.data());
 
-    Kernel3D kernel1 = [&]($buffer<uint4> a, $buffer<uint4> b, $buffer<uint4> tmp) {
-        set_block_size(32, layer_width / 16);
+    const uint n_iter = 4;
+    const uint n_block = layer_width / 16;
+    const uint tile_size = layer_width * n_iter * 16 / 8;
+    const uint smem_size = (layer_width / 8 + 1) * n_iter * 16;
 
-        $shared<uint4> b_tile{layer_width * tile_k / 8};
-        $uint4 a_frag[tile_k / 16];
+    Kernel3D kernel = [&]($buffer<uint4> a, $buffer<uint4> b, $buffer<uint4> c) {
+        set_block_size(32, n_block);
+
+        $shared<uint4> b_tile{smem_size};
+        $uint4 a_frag[n_block];
         $uint4 b_frag;
-        $uint4 c_frag[layer_width / 16];
+        $uint4 c_frag[n_iter];
 
         $ lid = $dispatch_x;
         $ wid = $dispatch_y;
-        $ tk = $dispatch_z;
+        $ tid = $dispatch_z;
 
-        for (int i = 0; i < tile_k / 16; i++) {
-            b_tile[lid + wid*32 + i*128] = b.read(lid + wid*32 + i*128 + tk*tile_k*layer_width/8);
+        for (int i = 0; i < n_iter; i++) {
+            b_tile[lid + lid / 8 + wid*36 + i*144] = b.read(lid + wid*32 + i*128 + tid*tile_size);
         }
         sync_block();
 
-        for (int i = 0; i < tile_k / 16; i++) {
-            wmma_load(a_frag[i], a, (wid+i*4)*32 + tk*tile_k*layer_width/8);
+        for (int i = 0; i < n_block; i++) {
+            wmma_load(a_frag[i], a, (wid+i*4)*32);
         }
-        for (int j = 0; j < layer_width / 16; j++) {
-            for (int i = 0; i < tile_k / 16; i++) {
-                wmma_load(b_frag, b_tile, (j + i * 4) * 32);
+        for (int j = 0; j < n_iter; j++) {
+            for (int i = 0; i < n_block; i++) {
+                wmma_load(b_frag, b_tile, (i + j * 4) * 36);
                 wmma(c_frag[j], a_frag[i], b_frag);
             }
         }
 
-        for (int j = 0; j < layer_width / 16; j++) {
-            wmma_store(c_frag[j], tmp, (wid+j*4)*32 + tk*layer_width*layer_width/8);
+        for (int j = 0; j < n_iter; j++) {
+            wmma_store(c_frag[j], c, (wid+j*4)*32 + tid*tile_size);
         }
-    };
-    Kernel1D kernel2 = [&]() {
-        $ idx = $dispatch_x;
-        $uint4 acc;
-        $for (tk, split_k) {
-            $ t = tmp->read(idx + tk*layer_width*layer_width/8);
-            acc = packed_half_add(acc, t);
-        };
-        c->write(idx, acc);
     };
 
     timer.tic();
-    auto shader1 = device.compile(kernel1);
-    auto shader2 = device.compile(kernel2);
+    auto shader = device.compile(kernel);
     print("compiled shader: {}\n", timer.toc());
 
-    for (int i = 0; i < 5; i++) {
-        timer.tic();
-        for (int i = 0; i < 1000; i++) {
-            stream << shader1(a, b, tmp).dispatch(32, layer_width / 16, split_k);
-        }
-        stream.synchronize();
-        print("{}\n", timer.toc());
-    }
+    stream.synchronize();
 
     for (int i = 0; i < 5; i++) {
         timer.tic();
-        for (int i = 0; i < 1000; i++) {
-            stream << shader2().dispatch(layer_width * layer_width / 8);
-        }
-        stream.synchronize();
-        print("{}\n", timer.toc());
-    }
-
-    for (int i = 0; i < 5; i++) {
-        timer.tic();
-        for (int i = 0; i < 1000; i++) {
-            stream << shader1(a, b, tmp).dispatch(32, layer_width / 16, split_k);
-            stream << shader2().dispatch(layer_width * layer_width / 8);
-            // stream.synchronize();
+        for (int i = 0; i < 100; i++) {
+            stream << shader(a, b, c).dispatch(32, n_block, batch_size / (n_iter*16));
         }
         stream.synchronize();
         print("{}\n", timer.toc());
@@ -221,7 +189,7 @@ int main(int argc, char *argv[]) {
     stream << c.copy_to(c_buffer.data()) << synchronize();
 
     float f_err = 0;
-    for (int i = 0; i < layer_width * layer_width; i++) {
+    for (int i = 0; i < layer_width * batch_size; i++) {
         f_err = max(f_err, abs(c_h[i] - c_buffer[i]));
     }
     print("f_err: {}\n", f_err);

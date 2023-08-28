@@ -18,53 +18,51 @@ void wmma_store($uint4 &frag, $buffer<uint4> &buf, $uint offset) {
     buf.write(offset + warp_lane_id(), frag);
 };
 
-Callable packed_half_dot_single = []($uint a, $uint b) -> $half {
-    return a.as<half>() * b.as<half>()
-        + (a >> 16).as<half>() * (b >> 16).as<half>();
+Callable packed_ushort_dot_single = []($uint a, $uint b) -> $uint {
+    return (a & 0xffff) * (b & 0xffff) + (a >> 16) * (b >> 16);
 };
-Callable packed_half_dot = []($uint4 a, $uint4 b) -> $half {
-    $half res = 0;
+Callable packed_ushort_dot = []($uint4 a, $uint4 b) -> $uint {
+    $uint res = 0;
     for (int i = 0; i < 4; i++) {
-        res += packed_half_dot_single(a[i], b[i]);
+        res += packed_ushort_dot_single(a[i], b[i]);
     }
     return res;
 };
-Callable packed_half_add_single = []($uint a, $uint b) -> $uint {
-    $uint t1 = (a.as<half>() + b.as<half>()).as<ushort>();
-    $uint t2 = ((a >> 16).as<half>() + (b >> 16).as<half>()).as<ushort>();
-    return (t2 << 16) + t1;
+Callable packed_ushort_add_single = []($uint a, $uint b) -> $uint {
+    return (((a >> 16) + (b >> 16)) << 16) + (((a & 0xffff) + (b & 0xffff)) & 0xffff);
 };
-Callable packed_half_add = []($uint4 a, $uint4 b) -> $uint4 {
+Callable packed_ushort_add = []($uint4 a, $uint4 b) -> $uint4 {
     for (int i = 0; i < 4; i++) {
-        a[i] = packed_half_add_single(a[i], b[i]);
+        a[i] = packed_ushort_add_single(a[i], b[i]);
     }
     return a;
 };
-Callable packed_half_add_index_single = []($uint x, $uint idx, $half v) -> $uint {
+Callable packed_ushort_add_index_single = []($uint x, $uint idx, $uint v) -> $uint {
     // idx is 0 or 1
     $uint2 tx = {x & 0xffff, x >> 16};
-    tx[idx] = (tx[idx].as<half>() + v).as<ushort>();
-    return (tx[1] << 16) + tx[0];
+    tx[idx] = tx[idx] + v;
+    return (tx[1] << 16) + (tx[0] & 0xffff);
 };
-void packed_half_add_index($uint4 &x, $uint idx, $half v) {
-    x[idx >> 1] = packed_half_add_index_single(x[idx >> 1], idx & 1, v);
+void packed_ushort_add_index($uint4 &x, $uint idx, $uint v) {
+    x[idx >> 1] = packed_ushort_add_index_single(x[idx >> 1], idx & 1, v);
 }
+
 Callable wmma_impl = []($uint4 c_frag, $uint4 a_frag, $uint4 b_frag) -> $uint4 {
     $ lid = warp_lane_id();
-    $half tmp0;
-    $half tmp1;
+    $uint tmp0;
+    $uint tmp1;
     $uint op = ((lid >> 3) ^ (lid >> 4)) & 1;
 
-    tmp0 = packed_half_dot(a_frag, b_frag);
+    tmp0 = packed_ushort_dot(a_frag, b_frag);
     tmp1 = warp_read_lane(tmp0, lid ^ 16);
-    packed_half_add_index(c_frag, lid & 7, (op^1) * (tmp0 + tmp1));
+    packed_ushort_add_index(c_frag, lid & 7, (op^1) * (tmp0 + tmp1));
 
     for (int t = 0; t < 2; t++) {
         for (int ofs = 1 - t; ofs < 8; ofs++) {
             $ t_frag = warp_read_lane(b_frag, lid ^ (ofs ^ (8*t)));
-            tmp0 = packed_half_dot(a_frag, t_frag);
+            tmp0 = packed_ushort_dot(a_frag, t_frag);
             tmp1 = warp_read_lane(tmp0, lid ^ 16);
-            packed_half_add_index(c_frag, (lid ^ ofs) & 7, (op^(1-t)) * (tmp0 + tmp1));
+            packed_ushort_add_index(c_frag, (lid ^ ofs) & 7, (op^(1-t)) * (tmp0 + tmp1));
         }
     }
     return c_frag;
@@ -72,7 +70,6 @@ Callable wmma_impl = []($uint4 c_frag, $uint4 a_frag, $uint4 b_frag) -> $uint4 {
 void wmma($uint4 &c_frag, $uint4 &a_frag, $uint4 &b_frag) {
     c_frag = wmma_impl(c_frag, a_frag, b_frag);
 }
-
 
 int main(int argc, char *argv[]) {
     Context ctx{argv[0]};
@@ -84,15 +81,15 @@ int main(int argc, char *argv[]) {
     const uint tile_k = 64;
     const uint split_k = batch_size / tile_k;
 
-    vector<half> a_h(layer_width * batch_size);
-    vector<half> b_h(layer_width * batch_size);
-    vector<float> c_h(layer_width * layer_width);
-    vector<half> c_buffer(layer_width * layer_width);
+    vector<ushort> a_h(layer_width * batch_size);
+    vector<ushort> b_h(layer_width * batch_size);
+    vector<ushort> c_h(layer_width * layer_width);
+    vector<ushort> c_buffer(layer_width * layer_width);
 
     srand(0);
     for (int i = 0; i < layer_width * batch_size; i++) {
-        a_h[i] = rand() / 65536.0;
-        b_h[i] = rand() / 65536.0;
+        a_h[i] = rand() % 3;
+        b_h[i] = rand() % 3;
     }
 
     Clock timer;
@@ -105,7 +102,7 @@ int main(int argc, char *argv[]) {
     //         }
     //     }
     // }
-    auto t_mma = [&](float* c, half* a, half* b) {
+    auto t_mma = [&](ushort* c, ushort* a, ushort* b) {
         for (int col = 0; col < 16; col++) {
             for (int row = 0; row < 16; row++) {
                 int c_idx = col % 8 + row * 8 + col / 8 * 128;
@@ -179,7 +176,7 @@ int main(int argc, char *argv[]) {
         $uint4 acc;
         $for (tk, split_k) {
             $ t = tmp->read(idx + tk*layer_width*layer_width/8);
-            acc = packed_half_add(acc, t);
+            acc = packed_ushort_add(acc, t);
         };
         c->write(idx, acc);
     };
@@ -220,11 +217,21 @@ int main(int argc, char *argv[]) {
 
     stream << c.copy_to(c_buffer.data()) << synchronize();
 
-    float f_err = 0;
-    for (int i = 0; i < layer_width * layer_width; i++) {
-        f_err = max(f_err, abs(c_h[i] - c_buffer[i]));
+    print("[");
+    for (int i = 0; i < 32; i++) {
+        print("{}", c_buffer[i]);
+        if (i < 31) print(", ");
     }
-    print("f_err: {}\n", f_err);
+    print("]\n");
+
+    int err_t = 0;
+    for (int i = 0; i < layer_width * layer_width; i++) {
+        if (c_h[i] != c_buffer[i]) {
+            print("error {}: {}, {}\n", i, c_h[i], c_buffer[i]);
+            err_t++;
+            if (err_t >= 32) break;
+        }
+    }
     print("ok\n");
 
     return 0;
