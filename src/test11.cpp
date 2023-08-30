@@ -4,6 +4,12 @@ using namespace luisa;
 using namespace luisa::compute;
 using namespace fmt;
 
+void swap($half &a, $half &b) {
+    $half t = a;
+    a = b;
+    b = t;
+}
+
 int main(int argc, char *argv[]) {
     Context ctx{argv[0]};
     Device device = ctx.create_device("dx");
@@ -40,11 +46,18 @@ int main(int argc, char *argv[]) {
     auto c = device.create_buffer<half4>(layer_width * batch_size / 4);
 
     auto test_mma = [](float* a, float* b, float* c) {
+        // for (int y = 0; y < batch_size; y++) {
+        //     for (int k = 0; k < layer_width; k++) {
+        //         float tmp = b[k + y * layer_width];
+        //         for (int x = 0; x < layer_width; x++) {
+        //             c[x + y*layer_width] += a[x + k * layer_width] * tmp;
+        //         }
+        //     }
+        // }
         for (int y = 0; y < batch_size; y++) {
-            for (int k = 0; k < layer_width; k++) {
-                float tmp = b[k + y * layer_width];
-                for (int x = 0; x < layer_width; x++) {
-                    c[x + y*layer_width] += a[x + k * layer_width] * tmp;
+            for (int x = 0; x < layer_width; x++) {
+                for (int k = 0; k < layer_width; k++) {
+                    c[x + y*layer_width] += a[k + x * layer_width] * b[k + y * layer_width];
                 }
             }
         }
@@ -74,21 +87,32 @@ int main(int argc, char *argv[]) {
         $half4 b_frag;
         $half4 acc[4];
 
+        $ lid = $dispatch_x % 32;
+        $ wid = $dispatch_x % block_size / 32;
         $ tid = $dispatch_x % block_size;
         $ bid = $dispatch_x / block_size;
 
         $ x_ofs = tid % 8;
-        $ y_ofs = tid % 32 / 8 + tid / 32 * 4;
+        $ y_ofs = tid / 8;
 
-        a_tile[tid] = a.read(tid);
+        // a_tile[tid] = a.read(tid);
+        acc[0] = a.read(tid);
+        $ idx = lid / 8;
+        for (int ofs = 1; ofs < 4; ofs++) {
+            $half t = warp_read_lane(acc[0][idx^ofs], lid^(ofs*8));
+            acc[0][idx^ofs] = t;
+        }
+        a_tile[wid + (lid/8 + lid%8*4)*8] = acc[0];
+
         for (int i = 0; i < 4; i++) {
             acc[i] = b.read(tid%8 + (i + tid/8*4)*8 + bid*tile_size);
         }
         for (int i = 1; i < 4; i++) {
             for (int j = 0; j < i; j++) {
-                $half t = acc[i][j];
-                acc[i][j] = acc[j][i];
-                acc[j][i] = t;
+                swap(acc[i][j], acc[j][i]);
+                // $half t = acc[i][j];
+                // acc[i][j] = acc[j][i];
+                // acc[j][i] = t;
             }
         }
         for (int i = 0; i < 4; i++) {
@@ -124,7 +148,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < 10; i++) {
         timer.tic();
         for (int i = 0; i < 100; i++) {
-            stream << shader(a, b, c).dispatch(batch_size) << shader(a1, c, c).dispatch(batch_size);
+            stream << shader(a, b, c).dispatch(batch_size * 2) << shader(a1, c, c).dispatch(batch_size * 2);
         }
         stream.synchronize();
         print("{}\n", timer.toc());
@@ -142,7 +166,7 @@ int main(int argc, char *argv[]) {
 
     float f_err = 0;
     int err_c = 0;
-    for (int i = 0; i < layer_width * batch_size / 4; i++) {
+    for (int i = 0; i < layer_width * batch_size; i++) {
         float err = abs(c1_h[i] - c_buffer[i]);
         f_err = max(f_err, err);
         if (err > 0.1) {

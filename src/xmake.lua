@@ -62,6 +62,11 @@ target("test12")
     add_files("test12.cpp")
     add_deps("lc-runtime", "lc-dsl", "lc-vstl", "lc-backends-dummy")
 
+target("test13")
+    set_kind("binary")
+    add_files("test13.cpp")
+    add_deps("lc-runtime", "lc-dsl", "lc-vstl", "lc-backends-dummy")
+
 target("matmul_res1")
     set_kind("binary")
     add_files("matmul_res1.cpp")
