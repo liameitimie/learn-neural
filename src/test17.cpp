@@ -87,7 +87,7 @@ void activation_backward($half &x, $half &fwd_act) {
     switch (activation) {
         case Activation::ReLU: x *= (fwd_act > 0).cast<half>();break;
         case Activation::LeakyReLU: x *= half(1) - half(0.9)*(fwd_act <= 0).cast<half>();break;
-        case Activation::Sine: x *= sin(asin(fwd_act)).cast<half>();break;
+        case Activation::Sine: x *= cos(asin(fwd_act)).cast<half>();break;
         case Activation::None:break;
     }
 }
@@ -145,9 +145,9 @@ float loss_gradient_host(float prediction, float target, uint batch_size) {
 
 namespace optimizer {
 
-float learning_rate = 0.01;
+float learning_rate = 0.001;
 float beta1 = 0.9;
-float beta2 = 0.99;
+float beta2 = 0.999;
 float eps = 1e-8;
 uint t = 0;
 
@@ -157,8 +157,8 @@ Buffer<float4> vt;
 
 Kernel1D optimize_kernel = []($buffer<half4> weights, $buffer<half4> gradients, $uint t, $buffer<float4> weights_fp, $buffer<float4> mt, $buffer<float4> vt) {
     $uint tid = $dispatch_x;
-    // $float4 w = weights_fp.read(tid);
-    // $half4 g = gradients.read(tid);
+    $float4 w = weights_fp.read(tid);
+    $half4 g = gradients.read(tid);
     // $float4 m = mt.read(tid);
     // $float4 v = vt.read(tid);
     // $float tg;
@@ -179,12 +179,15 @@ Kernel1D optimize_kernel = []($buffer<half4> weights, $buffer<half4> gradients, 
     // weights_fp.write(tid, w);
     // $half4 tw = w;
     // weights.write(tid, tw);
-    $half4 w = weights.read(tid);
-    $half4 g = gradients.read(tid);
+
+    // $half4 w = weights.read(tid);
+    // $half4 g = gradients.read(tid);
     for (int i = 0; i < 4; i++) {
-        w[i] -= half(learning_rate) * g[i];
+        w[i] -= learning_rate * g[i].cast<float>();
     }
-    weights.write(tid, w);
+    weights_fp.write(tid, w);
+    $half4 tw = w;
+    weights.write(tid, tw);
 };
 Shader1D<Buffer<half4>, Buffer<half4>, uint, Buffer<float4>, Buffer<float4>, Buffer<float4>> optimize_shader;
 
@@ -538,17 +541,17 @@ void test(vector<half> &input_h, vector<half> &target_h) {
 
     auto compare_buffer = [&](vector<float> &buf, string name) {
         print("{}_h: [", name);
-        // for (int i = 0; i < 64; i++) {
-        //     print("{}", buf[i]);
-        //     if (i < 63) print(", ");
-        // }
-        // print("]\n");
-        // print("{}_d: [", name);
-        // for (int i = 0; i < 64; i++) {
-        //     print("{}", tmp[i]);
-        //     if (i < 63) print(", ");
-        // }
-        // print("]\n");
+        for (int i = 0; i < 64; i++) {
+            print("{}", buf[i]);
+            if (i < 63) print(", ");
+        }
+        print("]\n");
+        print("{}_d: [", name);
+        for (int i = 0; i < 64; i++) {
+            print("{}", tmp[i]);
+            if (i < 63) print(", ");
+        }
+        print("]\n");
         float f_err = 0;
         float f_err2 = 0;
         int err_c = 0;
@@ -557,27 +560,27 @@ void test(vector<half> &input_h, vector<half> &target_h) {
         for (float x: buf) {
             M = max(M, x);
             m = min(m, x);
-            // float y = tmp[i];
-            // float err = abs(y - x) / max(abs(x), abs(y));
-            // float err2 = abs(y - x);
-            // if (err > f_err) {
-            //     print("!inc error {}: {}, {}; f_err: {}\n", i, x, y, err);
-            // }
-            // f_err = max(f_err, err);
-            // f_err2 = max(f_err2, err2);
-            // if (err > 0.01 || err2 > 0.005) {
-            //     if (err_c < 32) {
-            //         print("error {}: {}, {}\n", i, x, y);
-            //     }
-            //     err_c++;
-            // }
+            float y = tmp[i];
+            float err = abs(y - x) / max(abs(x), abs(y));
+            float err2 = abs(y - x);
+            if (err > f_err) {
+                print("!inc error {}: {}, {}; f_err: {}\n", i, x, y, err);
+            }
+            f_err = max(f_err, err);
+            f_err2 = max(f_err2, err2);
+            if (err > 0.01 || err2 > 0.005) {
+                if (err_c < 32) {
+                    print("error {}: {}, {}\n", i, x, y);
+                }
+                err_c++;
+            }
             i++;
         }
         print("max: {}, min: {}\n", M, m);
-        // print("f_err: {}\n", f_err);
-        // print("f_err2: {}\n", f_err2);
-        // print("err_c: {}\n", err_c);
-        // print("ok\n\n");
+        print("f_err: {}\n", f_err);
+        print("f_err2: {}\n", f_err2);
+        print("err_c: {}\n", err_c);
+        print("ok\n\n");
     };
 
     for (int i = 0; i < n; i++) {
@@ -643,14 +646,14 @@ int main(int argc, char *argv[]) {
         3
     );
 
-    // int t = 0;
+    int t = 0;
     while(!window.should_close()){
         // t++;
         // if (t > 32) break;
-        // trainer::train_step();
+        trainer::train_step();
         // trainer::test();
-        // trainer::inference();
-        // lc::stream << swapchain.present(trainer::inference_image);
+        trainer::inference();
+        lc::stream << swapchain.present(trainer::inference_image);
         // lc::stream << swapchain.present(trainer::train_image);
         window.poll_events();
     }
@@ -745,6 +748,13 @@ void load_512x4($buffer<half4> &buf, $shared<half4> &smem, $uint offset, $uint s
     smem[tid + 256] = buf.read(offset + (2 + tid/128)*stride);
 }
 
+void out_product_4x4_r($half4 &a, $half4 &b, $half4 *acc) {
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            acc[i][j] += a[i] * b[j];
+        }
+    }
+}
 void out_product_4x4_c($half4 &a, $half4 &b, $half4 *acc) {
     for (int j = 0; j < 4; j++) {
         for (int i = 0; i < 4; i++) {
