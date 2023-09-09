@@ -205,9 +205,13 @@ void optimize(Buffer<half4> &weights, Buffer<half4> &gradients) {
 
 }
 
+namespace encoder {
+    const uint encode_width = 32;
+}
+
 namespace network {
     const uint layer_width = 32;
-    const uint hidden_layers = 5;
+    const uint hidden_layers = 1;
 
     Buffer<half4> weight_buffer;
     BufferView<half4> layer_weight[hidden_layers - 1];

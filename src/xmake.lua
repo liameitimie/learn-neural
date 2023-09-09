@@ -1,3 +1,9 @@
+
+target("matmul_res1")
+    set_kind("binary")
+    add_files("matmul_res1.cpp")
+    add_deps("lc-runtime", "lc-dsl", "lc-vstl", "lc-backends-dummy")
+
 target("test1")
     set_kind("binary")
     add_files("test1.cpp")
@@ -95,7 +101,10 @@ target("test18")
     add_deps("lc-gui")
     set_rundir("$(projectdir)")
 
-target("matmul_res1")
+target("test19")
     set_kind("binary")
-    add_files("matmul_res1.cpp")
+    add_files("test19.cpp")
     add_deps("lc-runtime", "lc-dsl", "lc-vstl", "lc-backends-dummy")
+    add_deps("stb-image")
+    add_deps("lc-gui")
+    set_rundir("$(projectdir)")
