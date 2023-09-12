@@ -283,6 +283,8 @@ namespace encoder {
                 for (int l = 0; l < L / 2; l++) {
                     fwd_tmp(l*2 + i*L, t) = sin(x * (1 << l) * pi);
                     fwd_tmp(l*2 + 1 + i*L, t) = cos(x * (1 << l) * pi);
+                    // fwd_tmp(l*2 + i*L, t) = sin(x * (1 << l));
+                    // fwd_tmp(l*2 + 1 + i*L, t) = cos(x * (1 << l));
                 }
             }
         }
