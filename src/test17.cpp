@@ -254,11 +254,11 @@ namespace encoder {
 namespace encoder {
     const uint encode_width = 32;
     const uint L = 16;
-    const uint T = 1 << 18;
+    const uint T = 1 << 19;
     const uint F = 2;
     const uint N_min = 16;
-    // const uint N_max = 512;
-    // const float b = exp((log(N_max) - log(N_min)) / (L - 1));
+    const uint N_max = 512;
+    const float b = exp((log(N_max) - log(N_min)) / (L - 1));
 
     BufferView<half2> feature_table;
     BufferView<half2> feature_gradient;
@@ -269,10 +269,25 @@ namespace encoder {
     uint level_offset[L + 1];
     Buffer<uint> level_offset_buffer;
 
+    $float level_scale($uint &level) {
+        return pow(b, level.cast<float>()) * N_min - 1;
+    }
+    $uint level_resolution($float &scale) {
+        return ceil(scale).cast<uint>() + 1;
+    }
+    float level_scale(uint level) {
+        return pow(b, level) * N_min - 1;
+    }
+    uint level_resolution(float scale) {
+        return (uint)ceil(scale) + 1;
+    }
+
     void init_level_offset() {
         uint offset = 0;
         for (uint i = 0; i < L; i++) {
-            uint res = (1u << i) * N_min;
+            float s = level_scale(i);
+            uint res = level_resolution(s);
+            // uint res = (1u << i) * N_min;
             uint level_size = min(res * res, T);
             level_offset[i] = offset;
             offset += level_size;
@@ -288,16 +303,22 @@ namespace encoder {
         set_block_size(256);
         $uint tid = $dispatch_x;
         $half2 tmp;
-        tmp.x = 1.0f * as_uniform(tea(tid, 233));
-        tmp.y = 1.0f * as_uniform(tea(tid, 233 + 114514));
+        tmp.x = 1e-4f * as_uniform(tea(tid, 233));
+        tmp.y = 1e-4f * as_uniform(tea(tid, 233 + 114514));
         feature_table.write(tid, tmp);
     };
     Shader1D<Buffer<half2>> init_feature_shader;
 
-    void calc_pos($float2 &in, $float2 &pos, $uint2 &grid_idx, $uint &grid_res) {
-        $float2 tmp = in * (grid_res - 1).cast<float>();
-        grid_idx = floor(tmp);
-        pos = tmp - floor(tmp);
+    // void calc_pos($float2 &in, $float2 &pos, $uint2 &grid_idx, $uint &grid_res) {
+    //     $float2 tmp = in * (grid_res - 1).cast<float>();
+    //     grid_idx = floor(tmp);
+    //     pos = tmp - floor(tmp);
+    // }
+    void calc_pos($float2 &in, $float2 &pos, $uint2 &grid_idx, $float &scale) {
+        pos = in * scale + 0.5f;
+        $float2 tmp = floor(pos);
+        grid_idx = tmp;
+        pos -= tmp;
     }
     $uint table_idx($uint2 &grid_idx, $uint &grid_res, $uint &level_size) {
         $uint idx;
@@ -320,12 +341,14 @@ namespace encoder {
         $uint level_offset = level_offsets.read(level);
         $uint level_size = level_offsets.read(level + 1) - level_offset;
 
-        $uint grid_res = (1u << level) * N_min;
+        // $uint grid_res = (1u << level) * N_min;
+        $float scale = level_scale(level);
+        $uint grid_res = level_resolution(scale);
 
         $float2 in = input.read(tid + bid*512);
         $float2 pos;
         $uint2 grid_idx;
-        calc_pos(in, pos, grid_idx, grid_res);
+        calc_pos(in, pos, grid_idx, scale);
 
         $float2 res_feature;
         for (int t = 0; t < 4; t++) {
@@ -362,7 +385,9 @@ namespace encoder {
         $uint level_offset = level_offsets.read(level);
         $uint level_size = level_offsets.read(level + 1) - level_offset;
 
-        $uint grid_res = (1u << level) * N_min;
+        // $uint grid_res = (1u << level) * N_min;
+        $float scale = level_scale(level);
+        $uint grid_res = level_resolution(scale);
 
         $if (tid < 128) {
             smem[tid] = input_grad.read(tid%64 + bid*64 + (level*2 + tid/64)*batch_size/4);
@@ -376,7 +401,7 @@ namespace encoder {
         $float2 in = input.read(tid + bid*256);
         $float2 pos;
         $uint2 grid_idx;
-        calc_pos(in, pos, grid_idx, grid_res);
+        calc_pos(in, pos, grid_idx, scale);
 
         for (int t = 0; t < 4; t++) {
             $float w = 1;
