@@ -1,5 +1,9 @@
 # learn-neural
 
+## upd 2023-10-16
+
+重新组织一下代码
+
 ## upd 2023-9-13
 
 ### instant-ngp
