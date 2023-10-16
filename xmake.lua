@@ -3,7 +3,8 @@ add_rules("mode.debug", "mode.release")
 
 set_config("toolchain", "clang-cl")
 
-includes("src", "thirdparty")
+includes("src")
+includes("ext")
 
 --
 -- If you want to known more usage about xmake, please see https://xmake.io

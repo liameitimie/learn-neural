@@ -1,0 +1,5 @@
+target("test_matmul")
+    add_files("*.cpp")
+    add_deps("global", "matmuls")
+    add_deps("lc-runtime", "lc-core")
+target_end()

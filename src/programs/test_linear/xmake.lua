@@ -1,0 +1,5 @@
+target("test_linear")
+    add_files("*.cpp")
+    add_deps("global", "layers")
+    add_deps("lc-runtime", "lc-core")
+target_end()

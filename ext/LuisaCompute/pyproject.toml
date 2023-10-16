@@ -1,0 +1,43 @@
+[build-system]
+requires = ["pybind11", "scikit-build-core>=0.3.2", "ninja"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "luisa-python"
+version = "0.2.5"
+description = "A High-Performance Rendering Framework with Layered and Unified Interfaces on Stream Architectures"
+readme = "README.md"
+authors = [
+    { name = "LuisaGroup" },
+]
+homepage = "luisa-render.com"
+repository = "https://github.com/LuisaGroup/LuisaCompute"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "sourceinspect",
+    "numpy"
+]
+license = { file = "LICENSE" }
+
+[tool.scikit-build]
+cmake.minimum-version = "3.23"
+ninja.minimum-version = "1.10"
+ninja.make-fallback = false
+cmake.build-type = "Release"
+cmake.args = ["-G Ninja"]
+sdist.reproducible = false
+wheel.expand-macos-universal-tags = true
+wheel.packages = []
+# this causes CMake referencing a temporarily installed ninja
+# build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+LUISA_COMPUTE_BUILD_TESTS = "OFF"
+LUISA_COMPUTE_DOWNLOAD_NVCOMP = "ON"

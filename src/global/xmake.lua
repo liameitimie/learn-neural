@@ -1,0 +1,8 @@
+target("global")
+    set_kind("static")
+    add_files("*.cpp")
+    add_headerfiles("*.h")
+    add_deps("lc-runtime", "lc-backends-dummy")
+    add_deps("util")
+    add_includedirs(".", {public=true})
+target_end()
